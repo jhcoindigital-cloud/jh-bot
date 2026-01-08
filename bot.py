@@ -22,7 +22,7 @@ def run_web_server():
 
 # --- 2. CONFIGURATION ---
 # Sur Render, ajoute TELEGRAM_TOKEN dans "Environment Variables"
-TOKEN = 8349037970:AAHs6qJlHSaVnwA6PutPeppdyFB5zUnh9Bw
+TOKEN = "8349037970:AAHs6qJlHSaVnwA6PutPeppdyFB5zUnh9Bw"
 USER_ID = 501795546
 
 candles = []
@@ -140,4 +140,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main()) 
+
 
