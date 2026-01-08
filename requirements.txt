@@ -2,3 +2,4 @@ websockets
 pandas
 ta
 python-bot-telegram-bot
+flask
