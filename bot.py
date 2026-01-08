@@ -13,8 +13,9 @@ from telegram.ext import (
 )
 
 # ================= CONFIG =================
-TOKEN = os.getenv("BOT_TOKEN")          # Mets ton token dans Render (ENV VAR)
-ADMIN_CHAT_ID = os.getenv("CHAT_ID")    # Ton ID Telegram (ENV VAR)
+# Si tu n'as pas encore mis les ENV VAR sur Render, remplace direct ici pour tester
+TOKEN = os.getenv("BOT_TOKEN", "8553165413:AAE8CUjph44w-nmkpcRnlnz53EFk-V4vEOM")
+ADMIN_CHAT_ID = os.getenv("CHAT_ID", "501795546")
 
 last_price = "⏳ Connexion en cours..."
 binance_status = "❌ Déconnecté"
@@ -27,6 +28,7 @@ def home():
     return "Bot Telegram actif ✅"
 
 def run_web():
+    # Render utilise le port 10000 par défaut
     app.run(host="0.0.0.0", port=10000)
 
 # ================= TELEGRAM COMMANDES =================
@@ -53,7 +55,8 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= BINANCE WEBSOCKET =================
 async def binance_ws():
     global last_price, binance_status
-    uri = "wss://stream.binance.com:9443/ws/eurusdt@trade"
+    # Changement du port 9443 vers 443 pour Render
+    uri = "wss://stream.binance.com:443/ws/eurusdt@trade"
 
     while True:
         try:
@@ -61,42 +64,33 @@ async def binance_ws():
                 binance_status = "✅ Connecté"
                 while True:
                     data = json.loads(await ws.recv())
-                    last_price = data["p"]
+                    # Formatage du prix pour n'avoir que 4 décimales
+                    last_price = f"{float(data['p']):.4f}"
         except Exception:
             binance_status = "❌ Déconnecté"
             await asyncio.sleep(5)
 
-# ================= MESSAGE AU DÉPLOIEMENT =================
-async def notify_deploy(application: Application):
-    try:
-        await application.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text="🚀 Bot déployé et connecté avec succès sur Render"
-        )
-    except Exception as e:
-        print("Erreur notification Telegram :", e)
-
 # ================= MAIN =================
-async def main():
-    # Lancer le serveur web (Render)
+def main():
+    # 1. Lancer le serveur web
     Thread(target=run_web, daemon=True).start()
 
-    # Telegram app
+    # 2. Configurer l'application Telegram
     application = Application.builder().token(TOKEN).build()
+    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("price", price))
 
-    await application.initialize()
-    await notify_deploy(application)
-    await application.start()
+    # 3. Lancer Binance en arrière-plan AVANT le polling
+    loop = asyncio.get_event_loop()
+    loop.create_task(binance_ws())
 
-    # Lancer Binance en tâche parallèle
-    asyncio.create_task(binance_ws())
+    # 4. Lancement propre avec nettoyage du conflit (drop_pending_updates)
+    print("🚀 Bot prêt sur Render")
+    
+    # run_polling gère l'initialisation et le démarrage proprement
+    application.run_polling(drop_pending_updates=True)
 
-    # Polling Telegram
-    await application.run_polling()
-
-# ================= RUN =================
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
