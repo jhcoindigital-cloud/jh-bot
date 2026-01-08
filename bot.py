@@ -14,7 +14,7 @@ def run_web_server():
 
 # --- CONFIGURATION ---
 # Nouveau Token mis à jour
-TOKEN = "8553165413:AAE8CUjph44w-nmkpcRnlnz53EFk-V4vEOM"
+TOKEN = "8349037970:AAHs6qJlHSaVnwA6PutPeppdyFB5zUnh9Bw"
 USER_ID = 501795546
 last_price = 0.0
 status_ws = "🔴 Déconnecté"
@@ -80,3 +80,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
