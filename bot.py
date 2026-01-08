@@ -35,7 +35,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "price":
         txt = f"💰 **Prix EUR/USD ({now})**\nActuel : `{last_price if last_price > 0 else 'Calcul...'}`"
     elif query.data == "status":
-        txt = f"📡 **État du Serveur ({now})**\nFlux WS : {status_ws}\nBinance : {'✅ OK' if last_price > 0 else '❌ ERREUR'}"
+        txt = f"📡 **État du Serveur ({now})**\nFlux WS : {status_ws}"
     else: txt = "📊 Stats : 0W - 0L"
     await query.edit_message_text(text=txt, reply_markup=get_menu(), parse_mode="Markdown")
 
@@ -63,10 +63,9 @@ async def main():
     await application.initialize()
     await application.start()
     
-    # FORCE L'ARRÊT DES AUTRES BOTS EN CONFLIT
+    # FORCE LE DÉBLOCAGE DU CONFLIT
     await application.updater.start_polling(drop_pending_updates=True)
     
-    print("🚀 Bot unique démarré")
     try:
         await application.bot.send_message(chat_id=USER_ID, text="✅ **Conflit résolu !**\nLe flux Binance tente de se connecter...")
     except: pass
