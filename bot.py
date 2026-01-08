@@ -7,6 +7,7 @@ from collections import deque
 
 # ================= WEB SERVER (RENDER) =================
 app = Flask(__name__)
+server_ok = True
 
 @app.route("/")
 def home():
@@ -21,8 +22,12 @@ TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = 501795546
 
 prices = deque(maxlen=200)
-last_price = "Récupération..."
+last_price = "..."
 last_signal_time = 0
+
+# ================= ÉTATS =================
+telegram_ok = False
+binance_ok = False
 
 # ================= INDICATORS =================
 def EMA(data, period):
@@ -49,7 +54,8 @@ def RSI(data, period=14):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
         [InlineKeyboardButton("💰 Prix", callback_data="price")],
-        [InlineKeyboardButton("📊 Signal", callback_data="signal")]
+        [InlineKeyboardButton("📊 Signal", callback_data="signal")],
+        [InlineKeyboardButton("📡 État de connexion", callback_data="status")]
     ]
     await update.message.reply_text(
         "🤖 Bot Trading actif",
@@ -82,19 +88,21 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"EMA9 : `{round(ema9,5)}`\n"
                 f"EMA21 : `{round(ema21,5)}`"
             )
+        await query.edit_message_text(msg, parse_mode="Markdown")
 
-        await query.edit_message_text(
-            msg,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔄 Actualiser", callback_data="signal")]]
-            )
+    elif query.data == "status":
+        msg = (
+            "📡 *ÉTAT DES CONNEXIONS*\n\n"
+            f"🤖 Telegram : {'✅ CONNECTÉ' if telegram_ok else '❌ ERREUR'}\n"
+            f"🌐 Render : {'✅ ACTIF' if server_ok else '❌ INACTIF'}\n"
+            f"📊 Binance : {'✅ CONNECTÉ' if binance_ok else '⚠️ EN COURS'}\n"
+            f"💼 Pocket Option : ⚠️ SIGNAL UNIQUEMENT"
         )
+        await query.edit_message_text(msg, parse_mode="Markdown")
 
 # ================= SIGNAL ENGINE =================
 async def check_signal(app):
     global last_signal_time
-
     if len(prices) < 50:
         return
 
@@ -102,14 +110,13 @@ async def check_signal(app):
     ema9_now = EMA(list(prices)[-20:], 9)
     ema21_now = EMA(list(prices)[-40:], 21)
 
-    # Anti-spam : 1 signal / minute
     if time.time() - last_signal_time < 60:
         return
 
     if rsi < 30 and ema9_now > ema21_now:
         await app.bot.send_message(
             chat_id=CHAT_ID,
-            text="🟢 *SIGNAL BUY EUR/USD*\nRSI bas + croisement EMA",
+            text="🟢 *SIGNAL BUY EUR/USD*",
             parse_mode="Markdown"
         )
         last_signal_time = time.time()
@@ -117,28 +124,46 @@ async def check_signal(app):
     elif rsi > 70 and ema9_now < ema21_now:
         await app.bot.send_message(
             chat_id=CHAT_ID,
-            text="🔴 *SIGNAL SELL EUR/USD*\nRSI haut + croisement EMA",
+            text="🔴 *SIGNAL SELL EUR/USD*",
             parse_mode="Markdown"
         )
         last_signal_time = time.time()
 
 # ================= BINANCE =================
 async def binance_ws(app):
-    global last_price
+    global last_price, binance_ok
     uri = "wss://stream.binance.com/ws/eurusdt@kline_1m"
 
     while True:
         try:
             async with websockets.connect(uri) as ws:
+                binance_ok = True
                 async for msg in ws:
                     data = json.loads(msg)
                     price = float(data["k"]["c"])
                     last_price = price
                     prices.append(price)
                     await check_signal(app)
-        except Exception as e:
-            print("Binance reconnect:", e)
+        except:
+            binance_ok = False
             await asyncio.sleep(5)
+
+# ================= DÉPLOIEMENT MESSAGE =================
+async def on_startup(app):
+    global telegram_ok
+    telegram_ok = True
+    await app.bot.send_message(
+        chat_id=CHAT_ID,
+        text=(
+            "🚀 *BOT DÉPLOYÉ AVEC SUCCÈS*\n\n"
+            "🤖 Telegram : ✅ CONNECTÉ\n"
+            "🌐 Render : ✅ ACTIF\n"
+            "📊 Binance : ⏳ CONNEXION...\n"
+            "💼 Pocket Option : ⚠️ SIGNAL UNIQUEMENT"
+        ),
+        parse_mode="Markdown"
+    )
+    asyncio.create_task(binance_ws(app))
 
 # ================= MAIN =================
 def main():
@@ -148,7 +173,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(buttons))
 
-    application.post_init = lambda app: asyncio.create_task(binance_ws(app))
+    application.post_init = on_startup
 
     print("🚀 BOT TRADING ACTIF (RENDER)")
     application.run_polling(drop_pending_updates=True)
