@@ -1,10 +1,9 @@
-import asyncio, json, websockets, os
+import asyncio, json, websockets, os, time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask
 from threading import Thread
 from collections import deque
-import time
 
 # ================= WEB SERVER (RENDER) =================
 app = Flask(__name__)
@@ -19,7 +18,7 @@ def run_web():
 
 # ================= CONFIG =================
 TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = 501795546  # Ton ID Telegram
+CHAT_ID = 501795546
 
 prices = deque(maxlen=200)
 last_price = "Récupération..."
@@ -49,15 +48,15 @@ def RSI(data, period=14):
 # ================= TELEGRAM =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
-        [InlineKeyboardButton("💰 Voir le Prix", callback_data="price")],
-        [InlineKeyboardButton("📊 Voir Signal", callback_data="signal")]
+        [InlineKeyboardButton("💰 Prix", callback_data="price")],
+        [InlineKeyboardButton("📊 Signal", callback_data="signal")]
     ]
     await update.message.reply_text(
-        "✅ Bot en ligne !",
+        "🤖 Bot Trading actif",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
@@ -66,9 +65,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💰 *EUR/USD* : `{last_price}`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔄 Rafraîchir", callback_data="price")]]
+                [[InlineKeyboardButton("🔄 Actualiser", callback_data="price")]]
             )
         )
+
     elif query.data == "signal":
         if len(prices) < 30:
             msg = "⏳ Analyse en cours..."
@@ -82,11 +82,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"EMA9 : `{round(ema9,5)}`\n"
                 f"EMA21 : `{round(ema21,5)}`"
             )
+
         await query.edit_message_text(
             msg,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔄 Rafraîchir", callback_data="signal")]]
+                [[InlineKeyboardButton("🔄 Actualiser", callback_data="signal")]]
             )
         )
 
@@ -101,14 +102,56 @@ async def check_signal(app):
     ema9_now = EMA(list(prices)[-20:], 9)
     ema21_now = EMA(list(prices)[-40:], 21)
 
-    # Anti-spam: 1 signal / minute
+    # Anti-spam : 1 signal / minute
     if time.time() - last_signal_time < 60:
         return
 
     if rsi < 30 and ema9_now > ema21_now:
         await app.bot.send_message(
             chat_id=CHAT_ID,
-            text="🟢 **SIGNAL BUY EUR/USD**\nRSI bas + croisement EMA",
+            text="🟢 *SIGNAL BUY EUR/USD*\nRSI bas + croisement EMA",
             parse_mode="Markdown"
         )
-        last_signal_time = time.
+        last_signal_time = time.time()
+
+    elif rsi > 70 and ema9_now < ema21_now:
+        await app.bot.send_message(
+            chat_id=CHAT_ID,
+            text="🔴 *SIGNAL SELL EUR/USD*\nRSI haut + croisement EMA",
+            parse_mode="Markdown"
+        )
+        last_signal_time = time.time()
+
+# ================= BINANCE =================
+async def binance_ws(app):
+    global last_price
+    uri = "wss://stream.binance.com/ws/eurusdt@kline_1m"
+
+    while True:
+        try:
+            async with websockets.connect(uri) as ws:
+                async for msg in ws:
+                    data = json.loads(msg)
+                    price = float(data["k"]["c"])
+                    last_price = price
+                    prices.append(price)
+                    await check_signal(app)
+        except Exception as e:
+            print("Binance reconnect:", e)
+            await asyncio.sleep(5)
+
+# ================= MAIN =================
+def main():
+    Thread(target=run_web, daemon=True).start()
+
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(buttons))
+
+    application.post_init = lambda app: asyncio.create_task(binance_ws(app))
+
+    print("🚀 BOT TRADING ACTIF (RENDER)")
+    application.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
