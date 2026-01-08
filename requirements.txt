@@ -1,6 +1,5 @@
-python-telegram-bot
+python-telegram-bot==20.7
 websockets==10.4
-flask
-pandas
-ta
+flask==3.0.0
+
 
