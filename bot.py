@@ -5,7 +5,8 @@ import ta
 import websockets
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from datetime import datetime, timedelta
+from telegram.error import BadRequest
+from datetime import datetime
 from flask import Flask
 from threading import Thread
 import os
@@ -20,10 +21,10 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 
 # --- 2. CONFIGURATION ---
-TOKEN = "8349037970:AAHs6qJlHSaVnwA6PutPeppdyFB5zUnh9Bw"
+# Sur Render, ajoute TELEGRAM_TOKEN dans "Environment Variables"
+TOKEN = os.getenv("TELEGRAM_TOKEN", "8349037970:AAHs6qJlHSaVnwA6PutPeppdyFB5zUnh9Bw")
 USER_ID = 501795546
 
-# Variables globales
 candles = []
 stats = {"wins": 0, "losses": 0}
 last_price = 0.0
@@ -40,7 +41,6 @@ async def get_menu_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Répond à /start ou /menu"""
     await update.message.reply_text(
         "🎮 **Tableau de Bord interactif**\nChoisissez une option :",
         reply_markup=await get_menu_keyboard(),
@@ -48,24 +48,32 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Gère les clics sur les boutons"""
     query = update.callback_query
-    await query.answer() # Accuse réception du clic
+    await query.answer()
     
     global stats, last_price, status_ws
+    now = datetime.now().strftime("%H:%M:%S")
     
     if query.data == "stats":
         total = stats["wins"] + stats["losses"]
         wr = (stats["wins"] / total * 100) if total > 0 else 0
-        txt = f"📊 **Statistiques Actuelles**\n✅ Gains : {stats['wins']}\n❌ Pertes : {stats['losses']}\n📈 Winrate : {wr:.1f}%"
+        txt = f"📊 **Statistiques ({now})**\n✅ Gains : {stats['wins']}\n❌ Pertes : {stats['losses']}\n📈 Winrate : {wr:.1f}%"
     
     elif query.data == "price":
-        txt = f"💰 **Prix EUR/USD (Binance)**\nActuel : `{last_price}`"
+        txt = f"💰 **Prix EUR/USD ({now})**\nActuel : `{last_price}`"
         
     elif query.data == "status":
-        txt = f"📡 **État du Serveur**\nFlux WebSocket : {status_ws}\nServeur : 🟢 Online (Render)"
+        txt = f"📡 **État du Serveur ({now})**\nFlux WS : {status_ws}\nServeur : 🟢 Online"
 
-    await query.edit_message_text(text=txt, reply_markup=await get_menu_keyboard(), parse_mode="Markdown")
+    try:
+        await query.edit_message_text(
+            text=txt, 
+            reply_markup=await get_menu_keyboard(), 
+            parse_mode="Markdown"
+        )
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            print(f"Erreur Telegram: {e}")
 
 # --- 4. LOGIQUE DE TRADING ---
 
@@ -103,38 +111,32 @@ async def binance_stream(application):
                 candles[-1] = new_c
             
             if len(candles) > 60: candles.pop(0)
-            if k['x']: # Bougie fermée
+            if k['x']: 
                 await analyze_data(application, pd.DataFrame(candles))
 
 # --- 5. LANCEMENT ---
 
 async def main():
-    # Serveur Web Flask
-    Thread(target=run_web_server).start()
+    Thread(target=run_web_server, daemon=True).start()
 
-    # Configuration de l'application Telegram
     application = Application.builder().token(TOKEN).build()
-    
-    # Ajout des gestionnaires de commandes et boutons
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("menu", start_command))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Lancement du bot Telegram en arrière-plan
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
 
-    print("🚀 Bot et Menu Lancés")
-    await application.bot.send_message(chat_id=USER_ID, text="✅ **Bot Prêt !**\nTapez /menu pour afficher les boutons.")
-
-    # Lancement du flux de données
+    print("🚀 Bot Lancé")
+    
     while True:
         try:
             await binance_stream(application)
-        except:
+        except Exception as e:
             status_ws = "🔴 Reconnexion..."
+            print(f"Erreur Stream: {e}")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main()) 
