@@ -12,7 +12,7 @@ def run_web_server():
     app.run(host='0.0.0.0', port=10000)
 
 # --- CONFIG ---
-TOKEN = "8553165413:AAE8CUjph44w-nmkpcRnlnz53EFk-V4vEOM"
+TOKEN = "8349037970:AAEE3AqgyQWiI6TBVIdrJ4xR0aqNgF5Z9PU"
 USER_ID = 501795546
 last_price = "En attente..."
 
@@ -57,3 +57,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
