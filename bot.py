@@ -10,7 +10,7 @@ app = Flask('')
 @app.route('/')
 def home(): return "Bot is Alive"
 def run_web_server():
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
 
 # --- CONFIGURATION ---
 TOKEN = "8553165413:AAE8CUjph44w-nmkpcRnlnz53EFk-V4vEOM"
@@ -46,19 +46,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(text=txt, reply_markup=get_menu(), parse_mode="Markdown")
 
-# --- FLUX BINANCE ---
+# --- FLUX BINANCE (Correction Port 443) ---
 async def binance_stream():
     global last_price, status_ws
-    uri = "wss://stream.binance.com:9443/ws/eurusdt@kline_1m"
+    # Changement du port 9443 -> 443 pour éviter les blocages pare-feu
+    uri = "wss://stream.binance.com:443/ws/eurusdt@kline_1m"
+    
     while True:
         try:
-            async with websockets.connect(uri, ping_interval=20) as ws:
+            # Ajout de ssl_timeout pour plus de stabilité
+            async with websockets.connect(uri, ping_interval=20, close_timeout=10) as ws:
                 status_ws = "🟢 Connecté"
+                print("✅ Connecté au flux Binance")
                 while True:
                     res = await ws.recv()
                     data = json.loads(res)
                     last_price = float(data['k']['c'])
-        except:
+        except Exception as e:
+            print(f"❌ Erreur flux: {e}")
             status_ws = "🔴 Reconnexion..."
             await asyncio.sleep(5)
 
@@ -68,19 +73,17 @@ async def main():
     
     application = Application.builder().token(TOKEN).build()
     
-    # Correction de l'erreur asyncio : on utilise des fonctions directes
     application.add_handler(CommandHandler("menu", start_menu))
     application.add_handler(CommandHandler("start", start_menu))
     application.add_handler(CallbackQueryHandler(button_handler))
     
     await application.initialize()
     await application.start()
-    # Nettoyage des anciennes requêtes pour éviter le conflit Telegram
     await application.updater.start_polling(drop_pending_updates=True)
     
-    print("🚀 Bot prêt")
+    print("🚀 Bot prêt sur Render")
     try:
-        await application.bot.send_message(chat_id=USER_ID, text="✅ **Système Redémarré**\nLe menu est maintenant opérationnel.")
+        await application.bot.send_message(chat_id=USER_ID, text="✅ **Mise à jour appliquée**\nTentative de connexion au flux via port 443...")
     except: pass
     
     await binance_stream()
