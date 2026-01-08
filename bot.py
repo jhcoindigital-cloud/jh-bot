@@ -3,15 +3,14 @@ import json
 import pandas as pd
 import ta
 import websockets
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
-from telegram.request import HTTPXRequest
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 import os
 
-# --- 1. SERVEUR WEB ---
+# --- 1. SERVEUR WEB (POUR RENDER GRATUIT) ---
 app = Flask('')
 @app.route('/')
 def home(): return "Bot is Running!"
@@ -30,64 +29,109 @@ stats = {"wins": 0, "losses": 0}
 last_price = 0.0
 status_ws = "🔴 Déconnecté"
 
-# --- 3. FONCTIONS TELEGRAM ---
+# --- 3. FONCTIONS DES BOUTONS ---
 
-async def send_menu(bot):
-    """Envoie le menu principal avec boutons"""
+async def get_menu_keyboard():
     keyboard = [
-        [InlineKeyboardButton("📊 Voir les Stats", callback_name="stats"),
-         InlineKeyboardButton("💰 Prix Actuel", callback_name="price")],
-        [InlineKeyboardButton("📡 État du Serveur", callback_name="status")]
+        [InlineKeyboardButton("📊 Voir les Stats", callback_data="stats"),
+         InlineKeyboardButton("💰 Prix Actuel", callback_data="price")],
+        [InlineKeyboardButton("📡 État du Serveur", callback_data="status")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await bot.send_message(chat_id=USER_ID, text="🎮 **Tableau de Bord Bot**\nChoisissez une option :", 
-                           reply_markup=reply_markup, parse_mode="Markdown")
+    return InlineKeyboardMarkup(keyboard)
 
-async def handle_buttons():
-    """Gère les clics sur les boutons (Simulé via polling léger)"""
-    # Note: Sur Render Free, on utilise un bot simple. 
-    # Pour des boutons complexes, il faudrait un bot 'long polling'.
-    # On va rester sur l'essentiel pour ne pas alourdir le serveur.
-    pass
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Répond à /start ou /menu"""
+    await update.message.reply_text(
+        "🎮 **Tableau de Bord interactif**\nChoisissez une option :",
+        reply_markup=await get_menu_keyboard(),
+        parse_mode="Markdown"
+    )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Gère les clics sur les boutons"""
+    query = update.callback_query
+    await query.answer() # Accuse réception du clic
+    
+    global stats, last_price, status_ws
+    
+    if query.data == "stats":
+        total = stats["wins"] + stats["losses"]
+        wr = (stats["wins"] / total * 100) if total > 0 else 0
+        txt = f"📊 **Statistiques Actuelles**\n✅ Gains : {stats['wins']}\n❌ Pertes : {stats['losses']}\n📈 Winrate : {wr:.1f}%"
+    
+    elif query.data == "price":
+        txt = f"💰 **Prix EUR/USD (Binance)**\nActuel : `{last_price}`"
+        
+    elif query.data == "status":
+        txt = f"📡 **État du Serveur**\nFlux WebSocket : {status_ws}\nServeur : 🟢 Online (Render)"
+
+    await query.edit_message_text(text=txt, reply_markup=await get_menu_keyboard(), parse_mode="Markdown")
 
 # --- 4. LOGIQUE DE TRADING ---
 
-async def check_results(bot, current_price):
-    global stats
-    # (Logique identique à la précédente pour calculer les gains/pertes)
-    pass
+async def analyze_data(application, df):
+    global last_price
+    stoch = ta.momentum.StochasticOscillator(df['h'], df['l'], df['c']).stoch().iloc[-1]
+    macd = ta.trend.MACD(df['c'])
+    m_line, s_line = macd.macd().iloc[-1], macd.macd_signal().iloc[-1]
+    
+    curr_p = df['c'].iloc[-1]
+    signal = None
+    
+    if stoch < 20 and m_line > s_line: signal = "CALL"
+    elif stoch > 80 and m_line < s_line: signal = "PUT"
+    
+    if signal:
+        msg = f"🎯 **NOUVEAU SIGNAL**\nAction: {signal}\nPrix: `{curr_p}`\nStoch: `{stoch:.1f}`"
+        await application.bot.send_message(chat_id=USER_ID, text=msg)
 
-async def analyze_data(bot, df):
-    # (Logique de stratégie MACD/Stochastique identique)
-    # Quand un signal est envoyé, on rajoute le menu en dessous
-    pass
-
-async def binance_stream(bot):
+async def binance_stream(application):
     global candles, last_price, status_ws
     uri = "wss://stream.binance.com:9443/ws/eurusdt@kline_1m"
     async with websockets.connect(uri) as ws:
         status_ws = "🟢 Connecté"
         while True:
-            data = json.loads(await ws.recv())
+            message = await ws.recv()
+            data = json.loads(message)
             k = data['k']
             last_price = float(k['c'])
-            # ... (reste du traitement des bougies)
-            if k['x']:
-                await analyze_data(bot, pd.DataFrame(candles))
+            
+            new_c = {'t':k['t'], 'o':float(k['o']), 'h':float(k['h']), 'l':float(k['l']), 'c':last_price}
+            if not candles or candles[-1]['t'] != new_c['t']:
+                candles.append(new_c)
+            else:
+                candles[-1] = new_c
+            
+            if len(candles) > 60: candles.pop(0)
+            if k['x']: # Bougie fermée
+                await analyze_data(application, pd.DataFrame(candles))
+
+# --- 5. LANCEMENT ---
 
 async def main():
+    # Serveur Web Flask
     Thread(target=run_web_server).start()
-    
-    # Utilisation d'un bot simple pour Render
-    test_bot = Bot(token=TOKEN, request=HTTPXRequest(connect_timeout=30))
-    
-    print("🚀 Bot Déployé")
-    await test_bot.send_message(chat_id=USER_ID, text="✅ **Bot Déployé avec Succès !**")
-    await send_menu(test_bot)
 
+    # Configuration de l'application Telegram
+    application = Application.builder().token(TOKEN).build()
+    
+    # Ajout des gestionnaires de commandes et boutons
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("menu", start_command))
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    # Lancement du bot Telegram en arrière-plan
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    print("🚀 Bot et Menu Lancés")
+    await application.bot.send_message(chat_id=USER_ID, text="✅ **Bot Prêt !**\nTapez /menu pour afficher les boutons.")
+
+    # Lancement du flux de données
     while True:
         try:
-            await binance_stream(test_bot)
+            await binance_stream(application)
         except:
             status_ws = "🔴 Reconnexion..."
             await asyncio.sleep(5)
