@@ -1,9 +1,10 @@
-import asyncio, json, websockets, os, time
+import asyncio, json, websockets, os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from flask import Flask
 from threading import Thread
 from collections import deque
+import time
 
 # ================= WEB SERVER (RENDER) =================
 app = Flask(__name__)
@@ -18,10 +19,10 @@ def run_web():
 
 # ================= CONFIG =================
 TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = 501795546   # ton Telegram ID
+CHAT_ID = 501795546  # Ton ID Telegram
 
 prices = deque(maxlen=200)
-last_price = "..."
+last_price = "Récupération..."
 last_signal_time = 0
 
 # ================= INDICATORS =================
@@ -48,15 +49,15 @@ def RSI(data, period=14):
 # ================= TELEGRAM =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [
-        [InlineKeyboardButton("💰 Prix", callback_data="price")],
-        [InlineKeyboardButton("📊 Signal", callback_data="signal")]
+        [InlineKeyboardButton("💰 Voir le Prix", callback_data="price")],
+        [InlineKeyboardButton("📊 Voir Signal", callback_data="signal")]
     ]
     await update.message.reply_text(
-        "🤖 Bot Trading en ligne",
+        "✅ Bot en ligne !",
         reply_markup=InlineKeyboardMarkup(kb)
     )
 
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
@@ -68,8 +69,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [[InlineKeyboardButton("🔄 Rafraîchir", callback_data="price")]]
             )
         )
-
-    if query.data == "signal":
+    elif query.data == "signal":
         if len(prices) < 30:
             msg = "⏳ Analyse en cours..."
         else:
@@ -82,7 +82,6 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"EMA9 : `{round(ema9,5)}`\n"
                 f"EMA21 : `{round(ema21,5)}`"
             )
-
         await query.edit_message_text(
             msg,
             parse_mode="Markdown",
@@ -102,7 +101,7 @@ async def check_signal(app):
     ema9_now = EMA(list(prices)[-20:], 9)
     ema21_now = EMA(list(prices)[-40:], 21)
 
-    # anti-spam 1 signal / minute
+    # Anti-spam: 1 signal / minute
     if time.time() - last_signal_time < 60:
         return
 
@@ -112,45 +111,4 @@ async def check_signal(app):
             text="🟢 **SIGNAL BUY EUR/USD**\nRSI bas + croisement EMA",
             parse_mode="Markdown"
         )
-        last_signal_time = time.time()
-
-    elif rsi > 70 and ema9_now < ema21_now:
-        await app.bot.send_message(
-            chat_id=CHAT_ID,
-            text="🔴 **SIGNAL SELL EUR/USD**\nRSI haut + croisement EMA",
-            parse_mode="Markdown"
-        )
-        last_signal_time = time.time()
-
-# ================= BINANCE =================
-async def binance_ws(app):
-    global last_price
-    uri = "wss://stream.binance.com/ws/eurusdt@kline_1m"
-
-    while True:
-        try:
-            async with websockets.connect(uri) as ws:
-                async for msg in ws:
-                    data = json.loads(msg)
-                    price = float(data["k"]["c"])
-                    last_price = price
-                    prices.append(price)
-                    await check_signal(app)
-        except:
-            await asyncio.sleep(5)
-
-# ================= MAIN =================
-def main():
-    Thread(target=run_web, daemon=True).start()
-
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(buttons))
-
-    application.post_init = lambda app: asyncio.create_task(binance_ws(app))
-
-    print("🚀 BOT TRADING ACTIF (RENDER)")
-    application.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+        last_signal_time = time.
