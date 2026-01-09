@@ -12,34 +12,45 @@ TOKEN = os.getenv("BOT_TOKEN", "REMPLACE_PAR_TON_TOKEN")
 ADMIN_CHAT_ID = os.getenv("CHAT_ID", "REMPLACE_PAR_TON_CHAT_ID")
 
 last_price = "⏳ Connexion..."
-current_strategy = "FRACTALE_3"
-high_precedent = 0.0
+current_strategy = "FRACTALE_3" # Mode par défaut
+target_high = 0.0
+target_low = 0.0
 highs_history = []
-signal_envoye = False
+lows_history = []
+signal_envoye_call = False
+signal_envoye_put = False
 binance_status = "❌ Déconnecté"
 
 # ================= SERVEUR WEB (KEEP-ALIVE) =================
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Bot Actif ✅"
+def home(): return "Bot Trading Actif ✅"
 
 def run_web(): app.run(host="0.0.0.0", port=10000)
 
-# ================= LOGIQUE D'ANTICIPATION =================
-def calculer_anticipation(prix_actuel, niveau_casse, strategie):
-    ecart = ((prix_actuel - niveau_casse) / niveau_casse) * 100
-    if strategie == "FRACTALE_5":
-        exp, conf = "3-5 MIN", "ÉLEVÉE" if ecart > 0.02 else "MOYENNE"
-    elif strategie == "FRACTALE_3":
-        exp, conf = "2 MIN", "MOYENNE" if ecart > 0.01 else "FAIBLE"
-    else:
-        exp, conf = "1 MIN", "FAIBLE"
-    return exp, conf, ecart
+# ================= LOGIQUE D'ANALYSE PAR CATÉGORIE =================
+async def analyser_marche(app_tg, prix_actuel):
+    global target_high, target_low, signal_envoye_call, signal_envoye_put
+    
+    # 1. Vérifier la cassure de Haut (CALL)
+    if target_high > 0 and prix_actuel > target_high and not signal_envoye_call:
+        exp = "1m" if current_strategy == "SIMPLE" else "2m" if current_strategy == "FRACTALE_3" else "5m"
+        msg = f"🟢 **SIGNAL CALL ({current_strategy})**\n\n🎯 Niveau : `{target_high:.5f}`\n💰 Prix : `{prix_actuel:.5f}`\n⏳ Exp : **{exp}**"
+        await app_tg.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown")
+        signal_envoye_call = True
 
-# ================= FONCTIONS ASYNCHRONES =================
+    # 2. Vérifier la cassure de Bas (PUT)
+    if target_low > 0 and prix_actuel < target_low and not signal_envoye_put:
+        exp = "1m" if current_strategy == "SIMPLE" else "2m" if current_strategy == "FRACTALE_3" else "5m"
+        msg = f"🔴 **SIGNAL PUT ({current_strategy})**\n\n🎯 Niveau : `{target_low:.5f}`\n💰 Prix : `{prix_actuel:.5f}`\n⏳ Exp : **{exp}**"
+        await app_tg.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown")
+        signal_envoye_put = True
 
+# ================= BINANCE WEBSOCKET =================
 async def binance_ws(app_tg):
-    global last_price, binance_status, high_precedent, signal_envoye, highs_history
+    global last_price, binance_status, target_high, target_low, highs_history, lows_history
+    global signal_envoye_call, signal_envoye_put
+
     uri = "wss://stream.binance.com:443/ws/eurusdt@kline_1m"
     while True:
         try:
@@ -48,78 +59,75 @@ async def binance_ws(app_tg):
                 while True:
                     data = json.loads(await ws.recv())
                     k = data['k']
-                    price_actuel = float(k['c'])
-                    last_price = f"{price_actuel:.5f}"
+                    prix_actuel = float(k['c'])
+                    last_price = f"{prix_actuel:.5f}"
                     
-                    if k['x']: # Bougie Fermée
-                        val_high = float(k['h'])
-                        highs_history.append(val_high)
-                        if len(highs_history) > 5: highs_history.pop(0)
+                    if k['x']: # Quand la bougie ferme
+                        highs_history.append(float(k['h']))
+                        lows_history.append(float(k['l']))
+                        if len(highs_history) > 5:
+                            highs_history.pop(0)
+                            lows_history.pop(0)
 
+                        # MISE À JOUR DU NIVEAU SELON LA CATÉGORIE CHOISIE
                         if current_strategy == "SIMPLE":
-                            high_precedent = val_high
+                            target_high = highs_history[-1]
+                            target_low = lows_history[-1]
+                        
                         elif current_strategy == "FRACTALE_3" and len(highs_history) >= 3:
-                            h = highs_history[-3:]
-                            if h[1] > h[0] and h[1] > h[2]: high_precedent = h[1]
+                            h, l = highs_history[-3:], lows_history[-3:]
+                            if h[1] > h[0] and h[1] > h[2]: target_high = h[1]
+                            if l[1] < l[0] and l[1] < l[2]: target_low = l[1]
+                        
                         elif current_strategy == "FRACTALE_5" and len(highs_history) == 5:
-                            h = highs_history
-                            if h[2] > h[0] and h[2] > h[1] and h[2] > h[3] and h[2] > h[4]: high_precedent = h[2]
-                        signal_envoye = False
+                            h, l = highs_history, lows_history
+                            if h[2] > h[0] and h[2] > h[1] and h[2] > h[3] and h[2] > h[4]: target_high = h[2]
+                            if l[2] < l[0] and l[2] < l[1] and l[2] < l[3] and l[2] < l[4]: target_low = l[2]
+                        
+                        signal_envoye_call = False
+                        signal_envoye_put = False
 
-                    if high_precedent > 0 and price_actuel > high_precedent and not signal_envoye:
-                        exp, conf, pwr = calculer_anticipation(price_actuel, high_precedent, current_strategy)
-                        msg = (f"🔔 **SIGNAL ACHAT**\nStratégie : `{current_strategy}`\n"
-                               f"🎯 Niveau : `{high_precedent:.5f}`\n💰 Prix : `{price_actuel:.5f}`\n"
-                               f"⏳ Expiration : **{exp}** ({conf})")
-                        await app_tg.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown")
-                        signal_envoye = True
-        except Exception as e:
+                    # Analyse en temps réel du prix
+                    await analyser_marche(app_tg, prix_actuel)
+
+        except Exception:
             binance_status = "❌ Déconnecté"
             await asyncio.sleep(5)
 
-async def post_init(application: Application):
-    """ Lance les tâches dès que le bot démarre """
-    asyncio.create_task(binance_ws(application))
-    try:
-        await application.bot.send_message(chat_id=ADMIN_CHAT_ID, text="🚀 **Bot déployé sur Render !**")
-    except: pass
-
-# ================= HANDLERS TELEGRAM =================
-
+# ================= INTERFACE TELEGRAM =================
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🚀 Simple (1m)", callback_data='S_SIMPLE')],
-        [InlineKeyboardButton("💎 Fractale 3 (2m)", callback_data='S_3')],
-        [InlineKeyboardButton("🏆 Fractale 5 (3-5m)", callback_data='S_5')]
+        [InlineKeyboardButton("🚀 Simple (1m)", callback_data='SET_SIMPLE')],
+        [InlineKeyboardButton("💎 Fractale 3 (2m)", callback_data='SET_3')],
+        [InlineKeyboardButton("🏆 Fractale 5 (5m)", callback_data='SET_5')]
     ]
-    await update.message.reply_text("⚙️ **Réglages stratégie :**", 
-                                  reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await update.message.reply_text(f"Mode actuel : {current_strategy}\nChoisissez la catégorie de signaux à recevoir :", 
+                                  reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global current_strategy, signal_envoye
+    global current_strategy, signal_envoye_call, signal_envoye_put, target_high, target_low
     query = update.callback_query
     await query.answer()
-    mapping = {'S_SIMPLE': "SIMPLE", 'S_3': "FRACTALE_3", 'S_5': "FRACTALE_5"}
-    current_strategy = mapping.get(query.data, "FRACTALE_3")
-    signal_envoye = False
-    await query.edit_message_text(text=f"✅ Stratégie : *{current_strategy}*")
+    
+    mapping = {'SET_SIMPLE': "SIMPLE", 'SET_3': "FRACTALE_3", 'SET_5': "FRACTALE_5"}
+    current_strategy = mapping.get(query.data)
+    
+    # Reset pour forcer le nouveau calcul au prochain kline
+    target_high = target_low = 0.0
+    signal_envoye_call = signal_envoye_put = False
+    
+    await query.edit_message_text(text=f"✅ Catégorie activée : **{current_strategy}**\nLe bot attend la prochaine bougie pour définir les cibles.", parse_mode="Markdown")
 
-# ================= LANCEMENT =================
+async def post_init(application: Application):
+    asyncio.create_task(binance_ws(application))
+    await application.bot.send_message(chat_id=ADMIN_CHAT_ID, text="🚀 Bot déployé. Tapez /settings pour choisir votre stratégie.")
 
+# ================= MAIN =================
 def main():
-    # Serveur Flask en tâche de fond
     Thread(target=run_web, daemon=True).start()
-
-    # Configuration du Bot
-    builder = Application.builder().token(TOKEN)
-    builder.post_init(post_init) # <--- C'est ici qu'on lance les tâches proprement
-    app_tg = builder.build()
-
-    app_tg.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Bot actif. /settings")))
+    app_tg = Application.builder().token(TOKEN).post_init(post_init).build()
     app_tg.add_handler(CommandHandler("settings", settings))
     app_tg.add_handler(CallbackQueryHandler(button_handler))
-
-    print("🚀 Démarrage du bot...")
     app_tg.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
