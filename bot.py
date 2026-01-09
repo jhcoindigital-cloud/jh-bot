@@ -21,59 +21,26 @@ binance_status = "❌ Déconnecté"
 # ================= SERVEUR WEB (KEEP-ALIVE) =================
 app = Flask(__name__)
 @app.route("/")
-def home(): return "Bot Binary Anticipation Actif ✅"
+def home(): return "Bot Actif ✅"
 
 def run_web(): app.run(host="0.0.0.0", port=10000)
-
-# ================= NOTIFICATION DE DÉPLOIEMENT =================
-async def notify_deploy(app_tg):
-    """ Envoie un message dès que le bot est prêt sur Render """
-    try:
-        await asyncio.sleep(2) # Petit délai pour laisser le temps au bot de s'initialiser
-        await app_tg.bot.send_message(
-            chat_id=ADMIN_CHAT_ID,
-            text="🚀 **Bot déployé avec succès sur Render !**\n\nLe système d'analyse de trading est actif et surveille le marché. Tapez /settings pour configurer."
-        )
-        print("✅ Notification de déploiement envoyée.")
-    except Exception as e:
-        print(f"⚠️ Erreur notification déploiement : {e}")
 
 # ================= LOGIQUE D'ANTICIPATION =================
 def calculer_anticipation(prix_actuel, niveau_casse, strategie):
     ecart = ((prix_actuel - niveau_casse) / niveau_casse) * 100
     if strategie == "FRACTALE_5":
-        exp, confiance = "3-5 MIN", "ÉLEVÉE" if ecart > 0.02 else "MOYENNE"
+        exp, conf = "3-5 MIN", "ÉLEVÉE" if ecart > 0.02 else "MOYENNE"
     elif strategie == "FRACTALE_3":
-        exp, confiance = "2 MIN", "MOYENNE" if ecart > 0.01 else "FAIBLE"
+        exp, conf = "2 MIN", "MOYENNE" if ecart > 0.01 else "FAIBLE"
     else:
-        exp, confiance = "1 MIN", "FAIBLE (Scalping)"
-    return exp, confiance, ecart
+        exp, conf = "1 MIN", "FAIBLE"
+    return exp, conf, ecart
 
-# ================= TELEGRAM INTERFACE =================
-async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("🚀 Bougie Précédente (1m)", callback_data='STRAT_SIMPLE')],
-        [InlineKeyboardButton("💎 Fractale 3 Bougies (2m)", callback_data='STRAT_3')],
-        [InlineKeyboardButton("🏆 Fractale 5 Bougies (3-5m)", callback_data='STRAT_5')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(f"⚙️ **Configuration**\nMode actuel : `{current_strategy}`\nChoisissez votre stratégie :", 
-                                  reply_markup=reply_markup, parse_mode="Markdown")
+# ================= FONCTIONS ASYNCHRONES =================
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global current_strategy, signal_envoye
-    query = update.callback_query
-    await query.answer()
-    mapping = {'STRAT_SIMPLE': "SIMPLE", 'STRAT_3': "FRACTALE_3", 'STRAT_5': "FRACTALE_5"}
-    current_strategy = mapping.get(query.data, "FRACTALE_3")
-    signal_envoye = False
-    await query.edit_message_text(text=f"✅ Stratégie : *{current_strategy}* activée.", parse_mode="Markdown")
-
-# ================= ANALYSE & WEBSOCKET =================
 async def binance_ws(app_tg):
     global last_price, binance_status, high_precedent, signal_envoye, highs_history
     uri = "wss://stream.binance.com:443/ws/eurusdt@kline_1m"
-
     while True:
         try:
             async with websockets.connect(uri) as ws:
@@ -97,44 +64,62 @@ async def binance_ws(app_tg):
                         elif current_strategy == "FRACTALE_5" and len(highs_history) == 5:
                             h = highs_history
                             if h[2] > h[0] and h[2] > h[1] and h[2] > h[3] and h[2] > h[4]: high_precedent = h[2]
-                        
                         signal_envoye = False
 
                     if high_precedent > 0 and price_actuel > high_precedent and not signal_envoye:
                         exp, conf, pwr = calculer_anticipation(price_actuel, high_precedent, current_strategy)
-                        message = (
-                            f"🔔 **SIGNAL D'ACHAT BINAIRE**\n\n"
-                            f"📈 Stratégie : `{current_strategy}`\n"
-                            f"🎯 Niveau cassé : `{high_precedent:.5f}`\n"
-                            f"💰 Prix actuel : `{price_actuel:.5f}`\n"
-                            f"⚡ Force : `+{pwr:.3f}%`\n\n"
-                            f"⏳ **ANTICIPATION :**\n"
-                            f"👉 Expiration : **{exp}**\n"
-                            f"🛡️ Confiance : **{conf}**"
-                        )
-                        await app_tg.bot.send_message(chat_id=ADMIN_CHAT_ID, text=message, parse_mode="Markdown")
+                        msg = (f"🔔 **SIGNAL ACHAT**\nStratégie : `{current_strategy}`\n"
+                               f"🎯 Niveau : `{high_precedent:.5f}`\n💰 Prix : `{price_actuel:.5f}`\n"
+                               f"⏳ Expiration : **{exp}** ({conf})")
+                        await app_tg.bot.send_message(chat_id=ADMIN_CHAT_ID, text=msg, parse_mode="Markdown")
                         signal_envoye = True
-
-        except Exception:
+        except Exception as e:
             binance_status = "❌ Déconnecté"
             await asyncio.sleep(5)
 
+async def post_init(application: Application):
+    """ Lance les tâches dès que le bot démarre """
+    asyncio.create_task(binance_ws(application))
+    try:
+        await application.bot.send_message(chat_id=ADMIN_CHAT_ID, text="🚀 **Bot déployé sur Render !**")
+    except: pass
+
+# ================= HANDLERS TELEGRAM =================
+
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🚀 Simple (1m)", callback_data='S_SIMPLE')],
+        [InlineKeyboardButton("💎 Fractale 3 (2m)", callback_data='S_3')],
+        [InlineKeyboardButton("🏆 Fractale 5 (3-5m)", callback_data='S_5')]
+    ]
+    await update.message.reply_text("⚙️ **Réglages stratégie :**", 
+                                  reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global current_strategy, signal_envoye
+    query = update.callback_query
+    await query.answer()
+    mapping = {'S_SIMPLE': "SIMPLE", 'S_3': "FRACTALE_3", 'S_5': "FRACTALE_5"}
+    current_strategy = mapping.get(query.data, "FRACTALE_3")
+    signal_envoye = False
+    await query.edit_message_text(text=f"✅ Stratégie : *{current_strategy}*")
+
 # ================= LANCEMENT =================
+
 def main():
+    # Serveur Flask en tâche de fond
     Thread(target=run_web, daemon=True).start()
-    app_tg = Application.builder().token(TOKEN).build()
-    
-    app_tg.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Bot prêt. /settings")))
+
+    # Configuration du Bot
+    builder = Application.builder().token(TOKEN)
+    builder.post_init(post_init) # <--- C'est ici qu'on lance les tâches proprement
+    app_tg = builder.build()
+
+    app_tg.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("Bot actif. /settings")))
     app_tg.add_handler(CommandHandler("settings", settings))
     app_tg.add_handler(CallbackQueryHandler(button_handler))
 
-    loop = asyncio.get_event_loop()
-    
-    # --- LES TACHES ASYNCHRONES ---
-    loop.create_task(binance_ws(app_tg))
-    loop.create_task(notify_deploy(app_tg)) # <--- LA NOTIFICATION ICI
-    
-    print("🚀 Bot Options Binaires en ligne")
+    print("🚀 Démarrage du bot...")
     app_tg.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
