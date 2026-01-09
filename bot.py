@@ -4,23 +4,26 @@ import os
 import websockets
 from threading import Thread
 from flask import Flask
+from collections import deque
+from datetime import datetime, timedelta
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
 )
 
 # ================= CONFIG =================
-# Si tu n'as pas encore mis les ENV VAR sur Render, remplace direct ici pour tester
 TOKEN = os.getenv("BOT_TOKEN", "8553165413:AAE8CUjph44w-nmkpcRnlnz53EFk-V4vEOM")
-ADMIN_CHAT_ID = os.getenv("CHAT_ID", "501795546")
+ADMIN_CHAT_ID = int(os.getenv("CHAT_ID", "501795546"))
 
-last_price = "⏳ Connexion en cours..."
+prices = deque(maxlen=100)
 binance_status = "❌ Déconnecté"
+last_signal = None
 
-# ================= SERVEUR WEB (RENDER) =================
+# ================= SERVEUR WEB =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -28,69 +31,156 @@ def home():
     return "Bot Telegram actif ✅"
 
 def run_web():
-    # Render utilise le port 10000 par défaut
     app.run(host="0.0.0.0", port=10000)
 
-# ================= TELEGRAM COMMANDES =================
+# ================= INDICATEURS =================
+def ema(values, period):
+    if len(values) < period:
+        return None
+    k = 2 / (period + 1)
+    ema_val = values[0]
+    for v in values[1:]:
+        ema_val = v * k + ema_val * (1 - k)
+    return ema_val
+
+def rsi(values, period=14):
+    if len(values) < period + 1:
+        return None
+    gains, losses = 0, 0
+    for i in range(-period, -1):
+        diff = values[i + 1] - values[i]
+        if diff > 0:
+            gains += diff
+        else:
+            losses -= diff
+    if losses == 0:
+        return 100
+    rs = gains / losses
+    return 100 - (100 / (1 + rs))
+
+# ================= STRATÉGIE =================
+def generate_signal():
+    values = list(prices)
+    ema9 = ema(values[-9:], 9)
+    ema21 = ema(values[-21:], 21)
+    rsi14 = rsi(values)
+
+    if not ema9 or not ema21 or not rsi14:
+        return None
+
+    if ema9 > ema21 and rsi14 < 30:
+        return "BUY"
+    elif ema9 < ema21 and rsi14 > 70:
+        return "SELL"
+    return None
+
+def build_trade(signal, price):
+    if signal == "BUY":
+        tp = price + 0.0005
+        sl = price - 0.0003
+    else:
+        tp = price - 0.0005
+        sl = price + 0.0003
+
+    return {
+        "signal": signal,
+        "price": price,
+        "tp": round(tp, 5),
+        "sl": round(sl, 5),
+        "expire": (datetime.utcnow() + timedelta(minutes=1)).strftime("%H:%M:%S UTC")
+    }
+
+# ================= MENU =================
+def menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Signal EUR/USD", callback_data="signal")],
+        [InlineKeyboardButton("📊 Signal EUR/USD OTC", callback_data="signal_otc")],
+        [InlineKeyboardButton("📡 Statut", callback_data="status")],
+    ])
+
+# ================= TELEGRAM =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 Bot en ligne !\n"
-        "📌 Commandes disponibles :\n"
-        "/status – État des connexions\n"
-        "/price – Prix EUR/USDT"
-    )
+    await update.message.reply_text("🤖 Bot prêt\nChoisis 👇", reply_markup=menu())
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"📡 **État du bot**\n\n"
-        f"🌐 Serveur Render : ✅ Connecté\n"
-        f"📈 Binance : {binance_status}\n"
-        f"💰 Dernier prix EUR/USDT : `{last_price}`",
-        parse_mode="Markdown"
-    )
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
 
-async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"💰 EUR/USDT : `{last_price}`", parse_mode="Markdown")
+    if q.data.startswith("signal"):
+        signal = generate_signal()
+        if not signal:
+            txt = "⏳ Pas de signal valide pour le moment"
+        else:
+            price = prices[-1]
+            trade = build_trade(signal, price)
+            pair = "EUR/USD OTC" if "otc" in q.data else "EUR/USD"
+            txt = (
+                f"📊 **SIGNAL {pair}**\n\n"
+                f"📌 Action : **{trade['signal']}**\n"
+                f"💰 Entrée : `{trade['price']}`\n"
+                f"🎯 TP : `{trade['tp']}`\n"
+                f"🛑 SL : `{trade['sl']}`\n"
+                f"⏱ Expiration : **1 min**\n"
+                f"⏰ Fin : `{trade['expire']}`"
+            )
+        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=menu())
 
-# ================= BINANCE WEBSOCKET =================
+    elif q.data == "status":
+        await q.edit_message_text(
+            f"🌐 Render : ✅\n📈 Binance : {binance_status}",
+            reply_markup=menu()
+        )
+
+# ================= BINANCE =================
 async def binance_ws():
-    global last_price, binance_status
-    # Changement du port 9443 vers 443 pour Render
+    global binance_status
     uri = "wss://stream.binance.com:443/ws/eurusdt@trade"
-
     while True:
         try:
             async with websockets.connect(uri) as ws:
                 binance_status = "✅ Connecté"
                 while True:
                     data = json.loads(await ws.recv())
-                    # Formatage du prix pour n'avoir que 4 décimales
-                    last_price = f"{float(data['p']):.4f}"
-        except Exception:
+                    prices.append(float(data["p"]))
+        except:
             binance_status = "❌ Déconnecté"
             await asyncio.sleep(5)
 
+# ================= SIGNAUX AUTO =================
+async def auto_signals(app):
+    global last_signal
+    while True:
+        signal = generate_signal()
+        if signal and signal != last_signal:
+            trade = build_trade(signal, prices[-1])
+            msg = (
+                f"🔔 **SIGNAL AUTOMATIQUE**\n\n"
+                f"📊 EUR/USD & OTC\n"
+                f"📌 Action : **{trade['signal']}**\n"
+                f"💰 Entrée : `{trade['price']}`\n"
+                f"🎯 TP : `{trade['tp']}`\n"
+                f"🛑 SL : `{trade['sl']}`\n"
+                f"⏱ Expiration : **1 min**"
+            )
+            await app.bot.send_message(ADMIN_CHAT_ID, msg, parse_mode="Markdown")
+            last_signal = signal
+
+        await asyncio.sleep(60)  # SAFE POUR RENDER FREE
+
 # ================= MAIN =================
 def main():
-    # 1. Lancer le serveur web
     Thread(target=run_web, daemon=True).start()
 
-    # 2. Configurer l'application Telegram
-    application = Application.builder().token(TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("price", price))
+    tg = Application.builder().token(TOKEN).build()
+    tg.add_handler(CommandHandler("start", start))
+    tg.add_handler(CallbackQueryHandler(buttons))
 
-    # 3. Lancer Binance en arrière-plan AVANT le polling
     loop = asyncio.get_event_loop()
     loop.create_task(binance_ws())
+    loop.create_task(auto_signals(tg))
 
-    # 4. Lancement propre avec nettoyage du conflit (drop_pending_updates)
-    print("🚀 Bot prêt sur Render")
-    
-    # run_polling gère l'initialisation et le démarrage proprement
-    application.run_polling(drop_pending_updates=True)
+    print("🚀 Bot Pocket Option prêt (Render free safe)")
+    tg.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
