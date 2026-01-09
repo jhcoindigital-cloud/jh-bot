@@ -1,29 +1,32 @@
 import asyncio
 import json
 import os
+import time
 import websockets
 from threading import Thread
 from flask import Flask
-from collections import deque
-from datetime import datetime, timedelta
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import pandas as pd
+import ta
+
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     ContextTypes,
 )
 
 # ================= CONFIG =================
-TOKEN = os.getenv("BOT_TOKEN", "8553165413:AAE8CUjph44w-nmkpcRnlnz53EFk-V4vEOM")
-ADMIN_CHAT_ID = int(os.getenv("CHAT_ID", "501795546"))
+TOKEN = os.getenv("BOT_TOKEN", "REMPLACE_PAR_TON_TOKEN")
+ADMIN_CHAT_ID = os.getenv("CHAT_ID", "REMPLACE_PAR_TON_CHAT_ID")
 
-prices = deque(maxlen=100)
+last_price = "⏳ Connexion..."
 binance_status = "❌ Déconnecté"
-last_signal = None
+render_status = "✅ Actif"
 
-# ================= SERVEUR WEB =================
+prices = []
+
+# ================= SERVEUR WEB (RENDER) =================
 app = Flask(__name__)
 
 @app.route("/")
@@ -33,154 +36,123 @@ def home():
 def run_web():
     app.run(host="0.0.0.0", port=10000)
 
-# ================= INDICATEURS =================
-def ema(values, period):
-    if len(values) < period:
-        return None
-    k = 2 / (period + 1)
-    ema_val = values[0]
-    for v in values[1:]:
-        ema_val = v * k + ema_val * (1 - k)
-    return ema_val
-
-def rsi(values, period=14):
-    if len(values) < period + 1:
-        return None
-    gains, losses = 0, 0
-    for i in range(-period, -1):
-        diff = values[i + 1] - values[i]
-        if diff > 0:
-            gains += diff
-        else:
-            losses -= diff
-    if losses == 0:
-        return 100
-    rs = gains / losses
-    return 100 - (100 / (1 + rs))
-
-# ================= STRATÉGIE =================
-def generate_signal():
-    values = list(prices)
-    ema9 = ema(values[-9:], 9)
-    ema21 = ema(values[-21:], 21)
-    rsi14 = rsi(values)
-
-    if not ema9 or not ema21 or not rsi14:
-        return None
-
-    if ema9 > ema21 and rsi14 < 30:
-        return "BUY"
-    elif ema9 < ema21 and rsi14 > 70:
-        return "SELL"
-    return None
-
-def build_trade(signal, price):
-    if signal == "BUY":
-        tp = price + 0.0005
-        sl = price - 0.0003
-    else:
-        tp = price - 0.0005
-        sl = price + 0.0003
-
-    return {
-        "signal": signal,
-        "price": price,
-        "tp": round(tp, 5),
-        "sl": round(sl, 5),
-        "expire": (datetime.utcnow() + timedelta(minutes=1)).strftime("%H:%M:%S UTC")
-    }
-
-# ================= MENU =================
-def menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Signal EUR/USD", callback_data="signal")],
-        [InlineKeyboardButton("📊 Signal EUR/USD OTC", callback_data="signal_otc")],
-        [InlineKeyboardButton("📡 Statut", callback_data="status")],
-    ])
-
 # ================= TELEGRAM =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Bot prêt\nChoisis 👇", reply_markup=menu())
+    await update.message.reply_text(
+        "🤖 Bot en ligne\n\n"
+        "/status – État des connexions\n"
+        "/price – Dernier prix\n"
+    )
 
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"📡 **ÉTAT DU BOT**\n\n"
+        f"🌐 Render : {render_status}\n"
+        f"📈 Binance : {binance_status}\n"
+        f"💰 EUR/USDT : `{last_price}`",
+        parse_mode="Markdown"
+    )
 
-    if q.data.startswith("signal"):
-        signal = generate_signal()
-        if not signal:
-            txt = "⏳ Pas de signal valide pour le moment"
-        else:
-            price = prices[-1]
-            trade = build_trade(signal, price)
-            pair = "EUR/USD OTC" if "otc" in q.data else "EUR/USD"
-            txt = (
-                f"📊 **SIGNAL {pair}**\n\n"
-                f"📌 Action : **{trade['signal']}**\n"
-                f"💰 Entrée : `{trade['price']}`\n"
-                f"🎯 TP : `{trade['tp']}`\n"
-                f"🛑 SL : `{trade['sl']}`\n"
-                f"⏱ Expiration : **1 min**\n"
-                f"⏰ Fin : `{trade['expire']}`"
-            )
-        await q.edit_message_text(txt, parse_mode="Markdown", reply_markup=menu())
+async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"💰 EUR/USDT : `{last_price}`",
+        parse_mode="Markdown"
+    )
 
-    elif q.data == "status":
-        await q.edit_message_text(
-            f"🌐 Render : ✅\n📈 Binance : {binance_status}",
-            reply_markup=menu()
+# ================= NOTIFICATION DEPLOIEMENT =================
+async def notify_deploy(app):
+    try:
+        await app.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text="🚀 Bot déployé / redémarré avec succès sur Render"
         )
+    except Exception as e:
+        print("Erreur notification :", e)
 
-# ================= BINANCE =================
+# ================= BINANCE WEBSOCKET =================
 async def binance_ws():
-    global binance_status
+    global last_price, binance_status, prices
+
     uri = "wss://stream.binance.com:443/ws/eurusdt@trade"
+
     while True:
         try:
             async with websockets.connect(uri) as ws:
                 binance_status = "✅ Connecté"
                 while True:
                     data = json.loads(await ws.recv())
-                    prices.append(float(data["p"]))
-        except:
+                    price = float(data["p"])
+                    last_price = f"{price:.5f}"
+
+                    prices.append(price)
+                    if len(prices) > 200:
+                        prices.pop(0)
+
+        except Exception:
             binance_status = "❌ Déconnecté"
             await asyncio.sleep(5)
 
-# ================= SIGNAUX AUTO =================
-async def auto_signals(app):
-    global last_signal
-    while True:
-        signal = generate_signal()
-        if signal and signal != last_signal:
-            trade = build_trade(signal, prices[-1])
-            msg = (
-                f"🔔 **SIGNAL AUTOMATIQUE**\n\n"
-                f"📊 EUR/USD & OTC\n"
-                f"📌 Action : **{trade['signal']}**\n"
-                f"💰 Entrée : `{trade['price']}`\n"
-                f"🎯 TP : `{trade['tp']}`\n"
-                f"🛑 SL : `{trade['sl']}`\n"
-                f"⏱ Expiration : **1 min**"
-            )
-            await app.bot.send_message(ADMIN_CHAT_ID, msg, parse_mode="Markdown")
-            last_signal = signal
+# ================= STRATEGIE RSI / EMA =================
+def analyze_market():
+    if len(prices) < 50:
+        return None
 
-        await asyncio.sleep(60)  # SAFE POUR RENDER FREE
+    df = pd.DataFrame(prices, columns=["close"])
+
+    df["rsi"] = ta.momentum.RSIIndicator(df["close"], 14).rsi()
+    df["ema_fast"] = ta.trend.EMAIndicator(df["close"], 9).ema_indicator()
+    df["ema_slow"] = ta.trend.EMAIndicator(df["close"], 21).ema_indicator()
+
+    rsi = df["rsi"].iloc[-1]
+    ema_fast = df["ema_fast"].iloc[-1]
+    ema_slow = df["ema_slow"].iloc[-1]
+
+    if rsi < 30 and ema_fast > ema_slow:
+        return "📈 ACHAT"
+    elif rsi > 70 and ema_fast < ema_slow:
+        return "📉 VENTE"
+    return None
+
+# ================= SIGNAUX AUTOMATIQUES =================
+async def auto_signals(app):
+    while True:
+        signal = analyze_market()
+        if signal:
+            try:
+                await app.bot.send_message(
+                    chat_id=ADMIN_CHAT_ID,
+                    text=(
+                        f"📊 **SIGNAL AUTOMATIQUE**\n\n"
+                        f"💱 Paire : EUR/USD OTC\n"
+                        f"🎯 Signal : {signal}\n"
+                        f"⏱ Timeframe : 1 min\n"
+                        f"💰 Prix : {last_price}"
+                    ),
+                    parse_mode="Markdown"
+                )
+                await asyncio.sleep(60)  # anti-spam
+            except Exception as e:
+                print("Erreur signal :", e)
+
+        await asyncio.sleep(10)
 
 # ================= MAIN =================
 def main():
     Thread(target=run_web, daemon=True).start()
 
-    tg = Application.builder().token(TOKEN).build()
-    tg.add_handler(CommandHandler("start", start))
-    tg.add_handler(CallbackQueryHandler(buttons))
+    app_tg = Application.builder().token(TOKEN).build()
+
+    app_tg.add_handler(CommandHandler("start", start))
+    app_tg.add_handler(CommandHandler("status", status))
+    app_tg.add_handler(CommandHandler("price", price))
 
     loop = asyncio.get_event_loop()
     loop.create_task(binance_ws())
-    loop.create_task(auto_signals(tg))
+    loop.create_task(auto_signals(app_tg))
+    loop.create_task(notify_deploy(app_tg))
 
-    print("🚀 Bot Pocket Option prêt (Render free safe)")
-    tg.run_polling(drop_pending_updates=True)
+    print("🚀 Bot prêt sur Render")
+    app_tg.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
