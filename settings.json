@@ -1,0 +1,12 @@
+{
+    "actif": "EURUSD_otc",
+    "montant_base": 2.0,
+    "montant_actuel": 2.0,
+    "duree": 3,
+    "mode": 0,
+    "paused": false,
+    "restart_requested": true,
+    "is_running": true,
+    "last_update_id": 28730771,
+    "waiting_input": null
+}
